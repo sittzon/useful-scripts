@@ -6,6 +6,7 @@
 # If no metadata can be found, file will not be renamed.
 # - Supports pair renaming for image and video files
 # - Supports collision resolution for files with the same name
+# - Supports undo operation to revert the last rename operation
 #
 # 2025-01-24: 
 # - Does not handle subdirectories correctly
@@ -13,7 +14,41 @@
 #
 # TODO:
 # - Handle subdirectories
-# - Add support for undo last rename operation
+
+# Parse command-line arguments
+UNDO_FLAG=0
+while [[ "$#" -gt 0 ]]; do
+  case $1 in
+    --dir) TARGET_DIR="$2"; shift ;;
+    --undo) UNDO_FLAG=1 ;;
+    --help)
+      echo "Usage: $0 --dir <directory> [--undo]"
+      echo "  --dir    Specify the directory containing images to check."
+      echo "  --undo   Undo the last rename operation."
+      echo "  --help   Display this help message."
+      exit 0
+      ;;
+    *)
+      echo "Unknown parameter passed: $1"
+      echo "Use --help for usage information."
+      exit 1
+      ;;
+  esac
+  shift
+done
+
+# Check if the directory is provided
+if [ -z "$TARGET_DIR" ]; then
+  echo "Error: --dir option is required."
+  echo "Use --help for usage information."
+  exit 1
+fi
+
+# Check if the directory exists
+if [ ! -d "$TARGET_DIR" ]; then
+  echo "Error: Directory $TARGET_DIR does not exist."
+  exit 1
+fi
 
 # Exit immediately if a command exits with a non-zero status
 set -e
@@ -24,8 +59,38 @@ if ! command -v exiftool &> /dev/null; then
     exit 1
 fi
 
-# Folder containing media files (default is current directory)
-TARGET_DIR=${1:-.}
+LOG_FILE="./rename_log.txt" # Log file to store rename operations
+
+# Undo last rename operation
+if [[ $UNDO_FLAG -eq 1 ]]; then
+    if [[ ! -f "$LOG_FILE" ]]; then
+        echo "Error: No log file found. Cannot undo."
+        exit 1
+    fi
+
+    tail -r "$LOG_FILE" | while read -r LINE; do
+        ORIGINAL=$(echo "$LINE" | sed -n 's/^Renamed: \(.*\) ->.*/\1/p')
+        RENAMED=$(echo "$LINE" | sed -n 's/^Renamed: .* -> \(.*\)$/\1/p')
+
+        if [[ -n "$ORIGINAL" && -n "$RENAMED" ]]; then
+            if [[ -e "$RENAMED" ]]; then
+                mv "$RENAMED" "$ORIGINAL"
+                echo "Reverted: $RENAMED -> $ORIGINAL"
+            else
+                echo "Warning: File $RENAMED does not exist. Skipping."
+            fi
+        fi
+    done
+
+    # Clear log contents
+    truncate -s 0 "$LOG_FILE"
+
+    echo "Undo operation completed."
+    exit 0
+fi
+
+# Clear log contents
+truncate -s 0 "$LOG_FILE"
 
 # Create an associative array for grouping files
 typeset -A FILE_GROUPS
@@ -99,7 +164,7 @@ for BASENAME in ${(k)FILE_GROUPS}; do
 
         # Skip if no valid date is found
         if [ -z "$DATE_TAKEN" ]; then
-            echo "Warning: Skipping $IMAGE_FILE (no valid date found)"
+            echo "Warning: Skipping $IMAGE_FILE (no valid date found)" | tee -a "$LOG_FILE"
             continue
         fi
 
@@ -107,7 +172,7 @@ for BASENAME in ${(k)FILE_GROUPS}; do
         IMAGE_NEW_NAME=$(resolve_collision "$TARGET_DIR" "$DATE_TAKEN" "${IMAGE_FILE##*.}")
         mv "$IMAGE_FILE" "$TARGET_DIR/$IMAGE_NEW_NAME"
 
-        echo "Renamed: $IMAGE_FILE -> $TARGET_DIR/$IMAGE_NEW_NAME"
+        echo "Renamed: $IMAGE_FILE -> $TARGET_DIR/$IMAGE_NEW_NAME" | tee -a "$LOG_FILE"
     fi
 
     # Pair rename video file if it exists
@@ -116,7 +181,7 @@ for BASENAME in ${(k)FILE_GROUPS}; do
             # Use the same base name as the image file
             VIDEO_NEW_NAME=$(resolve_collision "$TARGET_DIR" "$DATE_TAKEN" "${VIDEO_FILE##*.}")
             mv "$VIDEO_FILE" "$TARGET_DIR/$VIDEO_NEW_NAME"
-            echo "Renamed: $VIDEO_FILE -> $TARGET_DIR/$VIDEO_NEW_NAME"
+            echo "Renamed: $VIDEO_FILE -> $TARGET_DIR/$VIDEO_NEW_NAME" | tee -a "$LOG_FILE"
         fi
     # Else, rename video file independently
     elif [[ -n $VIDEO_FILE ]] && [ -z "$DATE_TAKEN" ]; then
@@ -124,8 +189,10 @@ for BASENAME in ${(k)FILE_GROUPS}; do
         DATE_TAKEN=$(exiftool -s3 -d '%Y-%m-%d_%H%M%S' -CreateDate "$VIDEO_FILE" 2>/dev/null || echo "")
         VIDEO_NEW_NAME=$(resolve_collision "$TARGET_DIR" "$DATE_TAKEN" "${VIDEO_FILE##*.}")
         mv "$VIDEO_FILE" "$TARGET_DIR/$VIDEO_NEW_NAME"
-        echo "Renamed: $VIDEO_FILE -> $TARGET_DIR/$VIDEO_NEW_NAME"
+        echo "Renamed: $VIDEO_FILE -> $TARGET_DIR/$VIDEO_NEW_NAME" | tee -a "$LOG_FILE"
     fi
+
 done
 
 echo "Renaming completed successfully!"
+exit 0
