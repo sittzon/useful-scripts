@@ -1,19 +1,23 @@
 #!/bin/zsh
 # rename_media_files.sh
 #
-# Renaming tool for images and videos based on their metadata.
+# Renaming tool for images, sidecar and videos based on their metadata.
 # Uses exiftool to extract metadata and rename files accordingly.
 # If no metadata can be found, file will not be renamed.
-# - Supports pair renaming for image and video files
+# - Supports pair renaming for image and sidecar files
 # - Supports collision resolution for files with the same name
 # - Supports undo operation to revert the last rename operation
-#
-# 2025-01-24: 
-# - Does not handle subdirectories correctly
-# - Only supports files that have DateTimeOriginal or CreateDate metadata
+# - Handles subdirectories
 #
 # TODO:
-# - Handle subdirectories
+# - Use list of extensions in find command instead of multiple -iname flags
+# - User defined metadata field extraction
+
+# Config
+# Supported image and video extensions
+IMAGE_EXTENSIONS=("jpg" "jpeg" "png" "heic")
+IMAGE_SIDECAR_EXTENSIONS=("mp4" "mov" "aae")
+VIDEO_EXTENSIONS=("mp4" "mov" "avi" "mts")
 
 # Parse command-line arguments
 UNDO_FLAG=0
@@ -37,6 +41,37 @@ while [[ "$#" -gt 0 ]]; do
   shift
 done
 
+LOG_FILE="./rename_log.txt" # Log file to store rename operations
+
+# Undo last rename operation
+if [[ $UNDO_FLAG -eq 1 ]]; then
+    if [[ ! -f "$LOG_FILE" ]]; then
+        echo "Error: No log file found. Cannot undo."
+        exit 1
+    fi
+
+    # Read log file and apply reverse mv operation
+    tail -r "$LOG_FILE" | while read -r LINE; do
+        ORIGINAL=$(echo "$LINE" | sed -n 's/^Renamed: \(.*\) ->.*/\1/p')
+        RENAMED=$(echo "$LINE" | sed -n 's/^Renamed: .* -> \(.*\)$/\1/p')
+
+        if [[ -n "$ORIGINAL" && -n "$RENAMED" ]]; then
+            if [[ -e "$RENAMED" ]]; then
+                mv "$RENAMED" "$ORIGINAL"
+                echo "Reverted: $RENAMED -> $ORIGINAL"
+            else
+                echo "Warning: File $RENAMED does not exist. Skipping."
+            fi
+        fi
+    done
+
+    # Clear log contents
+    truncate -s 0 "$LOG_FILE"
+
+    echo "Undo operation completed."
+    exit 0
+fi
+
 # Check if the directory is provided
 if [ -z "$TARGET_DIR" ]; then
   echo "Error: --dir option is required."
@@ -59,45 +94,11 @@ if ! command -v exiftool &> /dev/null; then
     exit 1
 fi
 
-LOG_FILE="./rename_log.txt" # Log file to store rename operations
-
-# Undo last rename operation
-if [[ $UNDO_FLAG -eq 1 ]]; then
-    if [[ ! -f "$LOG_FILE" ]]; then
-        echo "Error: No log file found. Cannot undo."
-        exit 1
-    fi
-
-    tail -r "$LOG_FILE" | while read -r LINE; do
-        ORIGINAL=$(echo "$LINE" | sed -n 's/^Renamed: \(.*\) ->.*/\1/p')
-        RENAMED=$(echo "$LINE" | sed -n 's/^Renamed: .* -> \(.*\)$/\1/p')
-
-        if [[ -n "$ORIGINAL" && -n "$RENAMED" ]]; then
-            if [[ -e "$RENAMED" ]]; then
-                mv "$RENAMED" "$ORIGINAL"
-                echo "Reverted: $RENAMED -> $ORIGINAL"
-            else
-                echo "Warning: File $RENAMED does not exist. Skipping."
-            fi
-        fi
-    done
-
-    # Clear log contents
-    truncate -s 0 "$LOG_FILE"
-
-    echo "Undo operation completed."
-    exit 0
-fi
-
 # Clear log contents
 truncate -s 0 "$LOG_FILE"
 
 # Create an associative array for grouping files
 typeset -A FILE_GROUPS
-
-# Supported image and video extensions
-IMAGE_EXTENSIONS=("jpg" "jpeg" "png" "heic")
-VIDEO_EXTENSIONS=("mp4" "mov")
 
 # Helper function to check if an array contains an element
 function contains() {
@@ -127,70 +128,84 @@ function resolve_collision() {
     echo "$new_name"
 }
 
-# Iterate over all media files in the target directory
-find "$TARGET_DIR" -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png"  -o -iname "*.heic" -o -iname "*.mp4" -o -iname "*.mov" \) | while read -r FILE; do
-    # Extract the base name (without extension), and extension
-    BASENAME=$(basename "$FILE" | sed -E 's/\.[^.]+$//')
-    EXTENSION="${FILE##*.}"
-    EXTENSION_LOWER=$(echo "$EXTENSION" | tr '[:upper:]' '[:lower:]')
-
-    # Group files by their basename
-    FILE_GROUPS["$BASENAME"]="${FILE_GROUPS["$BASENAME"]}$FILE,"
-done
-
-# Process each group
-for BASENAME in ${(k)FILE_GROUPS}; do
-    IFS=',' read -r -A FILES <<< "${FILE_GROUPS[$BASENAME]}"
-    IMAGE_FILE=""
-    VIDEO_FILE=""
+# Pair renaming for image and sidecar files
+find "$TARGET_DIR" -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png"  -o -iname "*.heic" \) | while read -r FILE; do
+    SIDECAR_FILES=""
     DATE_TAKEN=""
 
-    # Separate image and video files
-    for FILE in "${FILES[@]}"; do
-        EXTENSION="${FILE##*.}"
-        EXTENSION_LOWER=$(echo "$EXTENSION" | tr '[:upper:]' '[:lower:]')
-
-        if contains "$EXTENSION_LOWER" "${IMAGE_EXTENSIONS[@]}"; then
-            IMAGE_FILE=$FILE
-        elif contains "$EXTENSION_LOWER" "${VIDEO_EXTENSIONS[@]}"; then
-            VIDEO_FILE=$FILE
-        fi
-    done
+    base_name=$(basename "$FILE")
+    dir_name=$(dirname "$FILE")
+    filename="${base_name%.*}"
+    extension="${base_name##*.}"
 
     # Rename image file
-    if [[ -n $IMAGE_FILE ]]; then
+    if [[ -n $FILE ]]; then
         # Extract DateTimeOriginal
-        DATE_TAKEN=$(exiftool -s3 -d '%Y-%m-%d_%H%M%S' -DateTimeOriginal "$IMAGE_FILE" 2>/dev/null || echo "")
+        DATE_TAKEN=$(exiftool -s3 -d '%Y-%m-%d_%H%M%S' -DateTimeOriginal "$FILE" 2>/dev/null || echo "")
 
         # Skip if no valid date is found
         if [ -z "$DATE_TAKEN" ]; then
-            echo "Warning: Skipping $IMAGE_FILE (no valid date found)" | tee -a "$LOG_FILE"
+            echo "Skipping: $FILE (no valid date found)" | tee -a "$LOG_FILE"
             continue
         fi
 
         # Resolve collisions
-        IMAGE_NEW_NAME=$(resolve_collision "$TARGET_DIR" "$DATE_TAKEN" "${IMAGE_FILE##*.}")
-        mv "$IMAGE_FILE" "$TARGET_DIR/$IMAGE_NEW_NAME"
+        IMAGE_NEW_NAME=$(resolve_collision "$dir_name" "$DATE_TAKEN" "$extension")
+        mv "$FILE" "$dir_name/$IMAGE_NEW_NAME"
 
-        echo "Renamed: $IMAGE_FILE -> $TARGET_DIR/$IMAGE_NEW_NAME" | tee -a "$LOG_FILE"
+        echo "Renamed: $FILE -> $dir_name/$IMAGE_NEW_NAME" | tee -a "$LOG_FILE"
     fi
 
-    # Pair rename video file if it exists
-    if [[ -n $VIDEO_FILE ]] && [ -n "$DATE_TAKEN" ]; then
-        if [[ -n $IMAGE_NEW_NAME ]]; then
-            # Use the same base name as the image file
-            VIDEO_NEW_NAME=$(resolve_collision "$TARGET_DIR" "$DATE_TAKEN" "${VIDEO_FILE##*.}")
-            mv "$VIDEO_FILE" "$TARGET_DIR/$VIDEO_NEW_NAME"
-            echo "Renamed: $VIDEO_FILE -> $TARGET_DIR/$VIDEO_NEW_NAME" | tee -a "$LOG_FILE"
+    # Find potential sidecar files
+    for EXTENSION in "${IMAGE_SIDECAR_EXTENSIONS[@]}"; do
+        SIDE_FILE="${dir_name}/${filename}.${EXTENSION}"
+        if [[ -e "$SIDE_FILE" ]]; then
+            SIDECAR_FILES="${SIDECAR_FILES}$SIDE_FILE;"
         fi
-    # Else, rename video file independently
-    elif [[ -n $VIDEO_FILE ]] && [ -z "$DATE_TAKEN" ]; then
-        # Extract -CreatedDate from video metadata and check for collisions
-        DATE_TAKEN=$(exiftool -s3 -d '%Y-%m-%d_%H%M%S' -CreateDate "$VIDEO_FILE" 2>/dev/null || echo "")
-        VIDEO_NEW_NAME=$(resolve_collision "$TARGET_DIR" "$DATE_TAKEN" "${VIDEO_FILE##*.}")
-        mv "$VIDEO_FILE" "$TARGET_DIR/$VIDEO_NEW_NAME"
-        echo "Renamed: $VIDEO_FILE -> $TARGET_DIR/$VIDEO_NEW_NAME" | tee -a "$LOG_FILE"
+    done
+
+    # Remove trailing comma
+    SIDECAR_FILES="${SIDECAR_FILES%;}"
+
+    # Rename sidecar files
+    if [[ -n $SIDECAR_FILES ]] && [ -n "$DATE_TAKEN" ]; then
+        # Convert string to an array (split by semicolon)
+        IFS=';' read -r -A sidecar_array <<< "$SIDECAR_FILES"
+        for SIDE_FILE in "${sidecar_array[@]}"; do
+            # Resolve collisions
+            SIDE_NEW_NAME=$(resolve_collision "$dir_name" "$DATE_TAKEN" "${SIDE_FILE##*.}")
+            mv "$SIDE_FILE" "$dir_name/$SIDE_NEW_NAME"
+
+            echo "Renamed: $SIDE_FILE -> $dir_name/$SIDE_NEW_NAME" | tee -a "$LOG_FILE"
+        done
     fi
+done
+
+find "$TARGET_DIR" -type f \( -iname "*.mp4" -o -iname "*.mov" -o -iname "*.avi"  -o -iname "*.mts" \) | while read -r FILE; do
+    base_name=$(basename "$FILE")
+    dir_name=$(dirname "$FILE")
+    filename="${base_name%.*}"
+
+    # Find potential corresponding image file, and if found, do not rename
+    IMAGE_FILE=""
+    for EXTENSION in "${IMAGE_EXTENSIONS[@]}"; do
+        IMG_FILE="${dir_name}/${filename}.${EXTENSION}"
+        if [[ -e "$IMG_FILE" ]]; then
+            IMAGE_FILE="$IMG_FILE"
+            break
+        fi
+    done
+
+    if [[ -n $IMAGE_FILE ]]; then
+        echo "Skipping: $FILE (video is already renamed, sidecar)" | tee -a "$LOG_FILE"
+        continue
+    fi
+
+    # Extract -CreatedDate from video metadata and check for collisions
+    DATE_TAKEN=$(exiftool -s3 -d '%Y-%m-%d_%H%M%S' -CreateDate "$FILE" 2>/dev/null || echo "")
+    VIDEO_NEW_NAME=$(resolve_collision "$dir_name" "$DATE_TAKEN" "${FILE##*.}")
+    mv "$FILE" "$dir_name/$VIDEO_NEW_NAME"
+    echo "Renamed: $FILE -> $dir_name/$VIDEO_NEW_NAME" | tee -a "$LOG_FILE"
 
 done
 
