@@ -7,11 +7,16 @@
 # - Supports pair renaming for image and sidecar files
 # - Supports collision resolution for files with the same name
 # - Supports undo operation to revert the last rename operation
-# - Handles subdirectories
+# - Use dry-run to see what files will be renamed without actually renaming them
 #
 # TODO:
 # - Use list of extensions in find command instead of multiple -iname flags
+# - User defined date format
 # - User defined metadata field extraction
+
+# Nice to have:
+# - Multiple undo levels
+# - User defined fallback metadata field
 
 # Config
 # Supported image and video extensions
@@ -21,15 +26,18 @@ VIDEO_EXTENSIONS=("mp4" "mov" "avi" "mts")
 
 # Parse command-line arguments
 UNDO_FLAG=0
+DRY_RUN_FLAG=0
 while [[ "$#" -gt 0 ]]; do
   case $1 in
     --dir) TARGET_DIR="$2"; shift ;;
     --undo) UNDO_FLAG=1 ;;
+    --dry-run) DRY_RUN_FLAG=1 ;;
     --help)
-      echo "Usage: $0 --dir <directory> [--undo]"
-      echo "  --dir    Specify the directory containing images to check."
-      echo "  --undo   Undo the last rename operation."
-      echo "  --help   Display this help message."
+      echo "Usage: $0 --dir <directory> [--undo] [--dry-run] [--help]"
+      echo "  --dir     Specify the directory containing images to check."
+      echo "  --undo    Undo the last rename operation."
+      echo "  --dry-run Show what files will be renamed without actually renaming them."
+      echo "  --help    Display this help message."
       exit 0
       ;;
     *)
@@ -41,7 +49,7 @@ while [[ "$#" -gt 0 ]]; do
   shift
 done
 
-LOG_FILE="./rename_log.txt" # Log file to store rename operations
+LOG_FILE="./rename_log.txt"
 
 # Undo last rename operation
 if [[ $UNDO_FLAG -eq 1 ]]; then
@@ -57,7 +65,9 @@ if [[ $UNDO_FLAG -eq 1 ]]; then
 
         if [[ -n "$ORIGINAL" && -n "$RENAMED" ]]; then
             if [[ -e "$RENAMED" ]]; then
-                mv "$RENAMED" "$ORIGINAL"
+                if [[ $DRY_RUN_FLAG -eq 0 ]]; then
+                    mv "$RENAMED" "$ORIGINAL"
+                fi
                 echo "Reverted: $RENAMED -> $ORIGINAL"
             else
                 echo "Warning: File $RENAMED does not exist. Skipping."
@@ -129,29 +139,31 @@ function resolve_collision() {
 }
 
 # Pair renaming for image and sidecar files
-find "$TARGET_DIR" -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png"  -o -iname "*.heic" \) | while read -r FILE; do
+find "$TARGET_DIR" -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.heic" \) | while read -r FILE; do
     SIDECAR_FILES=""
     DATE_TAKEN=""
 
-    base_name=$(basename "$FILE")
-    dir_name=$(dirname "$FILE")
-    filename="${base_name%.*}"
-    extension="${base_name##*.}"
+    local base_name=$(basename "$FILE")
+    local dir_name=$(dirname "$FILE")
+    local filename="${base_name%.*}"
+    local file_extension="${base_name##*.}"
 
     # Rename image file
-    if [[ -n $FILE ]]; then
+    if [[ -n "$FILE" ]]; then
         # Extract DateTimeOriginal
         DATE_TAKEN=$(exiftool -s3 -d '%Y-%m-%d_%H%M%S' -DateTimeOriginal "$FILE" 2>/dev/null || echo "")
 
         # Skip if no valid date is found
-        if [ -z "$DATE_TAKEN" ]; then
+        if [[ -z "$DATE_TAKEN" ]]; then
             echo "Skipping: $FILE (no valid date found)" | tee -a "$LOG_FILE"
             continue
         fi
 
         # Resolve collisions
-        IMAGE_NEW_NAME=$(resolve_collision "$dir_name" "$DATE_TAKEN" "$extension")
-        mv "$FILE" "$dir_name/$IMAGE_NEW_NAME"
+        IMAGE_NEW_NAME=$(resolve_collision "$dir_name" "$DATE_TAKEN" "$file_extension")
+        if [[ $DRY_RUN_FLAG -eq 0 ]]; then
+            mv "$FILE" "$dir_name/$IMAGE_NEW_NAME"
+        fi
 
         echo "Renamed: $FILE -> $dir_name/$IMAGE_NEW_NAME" | tee -a "$LOG_FILE"
     fi
@@ -164,30 +176,30 @@ find "$TARGET_DIR" -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png
         fi
     done
 
-    # Remove trailing comma
+    # Remove trailing semicolon
     SIDECAR_FILES="${SIDECAR_FILES%;}"
 
     # Rename sidecar files
-    if [[ -n $SIDECAR_FILES ]] && [ -n "$DATE_TAKEN" ]; then
-        # Convert string to an array (split by semicolon)
-        IFS=';' read -r -A sidecar_array <<< "$SIDECAR_FILES"
-        for SIDE_FILE in "${sidecar_array[@]}"; do
-            # Resolve collisions
-            SIDE_NEW_NAME=$(resolve_collision "$dir_name" "$DATE_TAKEN" "${SIDE_FILE##*.}")
+    IFS=';' read -rA ADDR <<< "$SIDECAR_FILES"
+    for SIDE_FILE in "${ADDR[@]}"; do
+        SIDE_EXTENSION="${SIDE_FILE##*.}"
+        SIDE_NEW_NAME=$(resolve_collision "$dir_name" "$DATE_TAKEN" "$SIDE_EXTENSION")
+        if [[ $DRY_RUN_FLAG -eq 0 ]]; then
             mv "$SIDE_FILE" "$dir_name/$SIDE_NEW_NAME"
+        fi
 
-            echo "Renamed: $SIDE_FILE -> $dir_name/$SIDE_NEW_NAME" | tee -a "$LOG_FILE"
-        done
-    fi
+        echo "Renamed: $SIDE_FILE -> $dir_name/$SIDE_NEW_NAME" | tee -a "$LOG_FILE"
+    done
 done
 
+# Rename video files
 find "$TARGET_DIR" -type f \( -iname "*.mp4" -o -iname "*.mov" -o -iname "*.avi"  -o -iname "*.mts" \) | while read -r FILE; do
-    base_name=$(basename "$FILE")
-    dir_name=$(dirname "$FILE")
-    filename="${base_name%.*}"
+    local base_name=$(basename "$FILE")
+    local dir_name=$(dirname "$FILE")
+    local filename="${base_name%.*}"
 
     # Find potential corresponding image file, and if found, do not rename
-    IMAGE_FILE=""
+    local IMAGE_FILE=""
     for EXTENSION in "${IMAGE_EXTENSIONS[@]}"; do
         IMG_FILE="${dir_name}/${filename}.${EXTENSION}"
         if [[ -e "$IMG_FILE" ]]; then
@@ -202,11 +214,17 @@ find "$TARGET_DIR" -type f \( -iname "*.mp4" -o -iname "*.mov" -o -iname "*.avi"
     fi
 
     # Extract -CreatedDate from video metadata and check for collisions
-    DATE_TAKEN=$(exiftool -s3 -d '%Y-%m-%d_%H%M%S' -CreateDate "$FILE" 2>/dev/null || echo "")
-    VIDEO_NEW_NAME=$(resolve_collision "$dir_name" "$DATE_TAKEN" "${FILE##*.}")
-    mv "$FILE" "$dir_name/$VIDEO_NEW_NAME"
+    local DATE_TAKEN=$(exiftool -s3 -d '%Y-%m-%d_%H%M%S' -CreateDate "$FILE" 2>/dev/null || echo "")
+    # Check if date not found, i.e date is 0000:00:00 00:00:00
+    if [[ "$DATE_TAKEN" == "0000:00:00 00:00:00" ]]; then
+        echo "Skipping: $FILE (no valid date found)" | tee -a "$LOG_FILE"
+        continue
+    fi
+    local VIDEO_NEW_NAME=$(resolve_collision "$dir_name" "$DATE_TAKEN" "${FILE##*.}")
+    if [[ $DRY_RUN_FLAG -eq 0 ]]; then
+        mv "$FILE" "$dir_name/$VIDEO_NEW_NAME"
+    fi
     echo "Renamed: $FILE -> $dir_name/$VIDEO_NEW_NAME" | tee -a "$LOG_FILE"
-
 done
 
 echo "Renaming completed successfully!"
