@@ -1,23 +1,30 @@
-#!/bin/bash
+#!/bin/zsh
+# check_corrupt_files.sh
+#
+# Tool for verifying file integrity for images, videos and audio. 
+# Uses ImageMagick and ffprobe (ffmpeg) for file verification.
+# Calculates and stores CRC checksum for files that passes verification.
 
-# Directory containing the files
-IMAGE_DIR=""
-OUTPUT_FILE="corrupt_files.txt"
-VERBOSE_FLAG="-verbose"
+IMAGE_EXTENSIONS=("jpg" "jpeg" "png" "webp" "heic")
+VIDEO_EXTENSIONS=("mp4" "mov" "mpg" "avi" "mkv" "flv" "wmv" "webm" "mts")
+
+TARGET_DIR=""
+OUTPUT_FILE="./corrupt_files.txt"
 NO_VERIFY_FLAG=0
 CORRUPT_FILES_FOUND=0
+VERBOSE_FLAG=0
 
 # Parse command-line arguments
 while [[ "$#" -gt 0 ]]; do
   case $1 in
-    --dir) IMAGE_DIR="$2"; shift ;;
-    --no-verify) NO_VERIFY_FLAG=1; shift ;;
-    --no-verbose) VERBOSE_FLAG=""; shift ;;
+    --dir) TARGET_DIR="$2"; shift ;;
+    --no-verify) NO_VERIFY_FLAG=1 ;;
+    --verbose) VERBOSE_FLAG=1 ;;
     --help)
-      echo "Usage: $0 --dir <directory> [--no-verbose] [--no-verify] [--help]"
+      echo "Usage: $0 --dir <directory> [--no-verify] [--verbose] [--help]"
       echo "  --dir          Specify the directory containing images to check."
-      echo "  --no-verbose   Disable verbose mode for the ImageMagick identify command."
-      echo "  --no-verify    Disables crc32 verification of files that have a corresponding crc32-file"
+      echo "  --verbose      Echo crc matches and creation of crc files."
+      echo "  --no-verify    Disables crc verification of files that have a corresponding crc file."
       echo "  --help         Display this help message."
       exit 0
       ;;
@@ -31,104 +38,95 @@ while [[ "$#" -gt 0 ]]; do
 done
 
 # Check if the directory is provided
-if [ -z "$IMAGE_DIR" ]; then
+if [ -z "$TARGET_DIR" ]; then
   echo "Error: --dir option is required."
   echo "Use --help for usage information."
   exit 1
 fi
 
 # Check if the directory exists
-if [ ! -d "$IMAGE_DIR" ]; then
-  echo "Error: Directory $IMAGE_DIR does not exist."
+if [ ! -d "$TARGET_DIR" ]; then
+  echo "Error: Directory $TARGET_DIR does not exist."
   exit 1
 fi
 
 # Clear the output file if it exists
-> "$OUTPUT_FILE"
+truncate -s 0 "$OUTPUT_FILE"
 
-echo "Checking image, video and audio files in $IMAGE_DIR and subdirectories for corruption..."
+echo "Checking image and video files in $TARGET_DIR  for corruption..."
 
 # Function to calculate the CRC checksum of a file
+# BUG WITH CRC32: https://unix.stackexchange.com/questions/481141/why-does-crc32-say-some-of-my-files-are-bad
+# Replaced with modified crc32mod
 calculate_crc() {
-  crc32 "$1" 2>/dev/null || cksum "$1" | awk '{print $1}' # Use crc32 or fallback to cksum
+  ./crc32mod "$1" 2>/dev/null || cksum "$1" | awk '{print $1}' # Use crc32 or fallback to cksum
 }
 
-# Function to generate the .crc filename based on the hashed file path
-generate_crc_filename() {
-  local filepath="$1"
-  local hash=$(echo -n "$filepath" | shasum -a 256 | awk '{print $1}') # Hash the full file path
-  echo "$IMAGE_DIR/$hash.crc" # Store all .crc files in the root of the specified directory
-}
+# Prepare find command
+find_command="find \"$TARGET_DIR\" -type f"
+for EXTENSION in "${IMAGE_EXTENSIONS[@]}"; do
+    find_command="${find_command} -iname \"*.${EXTENSION}\" -o"
+done
+for EXTENSION in "${VIDEO_EXTENSIONS[@]}"; do
+    find_command="${find_command} -iname \"*.${EXTENSION}\" -o"
+done
+find_command="${find_command% -o}"
+# echo "find_command: $find_command"
 
-# Find all JPG, JPEG, and PNG files in the directory and its subdirectories
-find "$IMAGE_DIR" -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" \) | sort | while read -r file; do
-  # Generate a .crc filename based on the file path
-  # crc_file=$(generate_crc_filename "$file")
+# Find all image and video files in the directory and its subdirectories
+current_dir=""
+eval "$find_command" | sort | while read -r file; do
+  
+  dir=$(dirname "$file")
+  if ([ -z "$current_dir" ] || [ "$current_dir" != "$dir" ]); then
+    current_dir="$dir"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - Verifying directory: $current_dir"
+  fi
+  
+  # echo "file: $file"
 
-  # Check for corresponding .crc file
   crc_file="${file}.crc32.txt"
-  if [ -f "$crc_file" ] && [ $NO_VERIFY_FLAG -eq 0 ]; then
-    # Perform CRC check
-    calculated_crc=$(calculate_crc "$file")
-    stored_crc=$(cat "$crc_file" | tr -d '\r\n') # Handle potential line endings
-    if [ "$calculated_crc" != "$stored_crc" ]; then
-      echo "$(date '+%Y-%m-%d %H:%M:%S') - CRC mismatch: $file" >> "$OUTPUT_FILE"
-      CORRUPT_FILES_FOUND=1
+  # If corresponding .crc file found, then verify
+  if [ -f "$crc_file" ]; then
+    if [ $NO_VERIFY_FLAG -eq 0 ]; then
+      # Perform CRC check
+      calculated_crc=$(calculate_crc "$file")
+      stored_crc=$(cat "$crc_file" | tr -d '\r\n') # Handle potential line endings
+      if [ "$calculated_crc" != "$stored_crc" ]; then
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - CRC mismatch: $file" | tee -a "$OUTPUT_FILE"
+        CORRUPT_FILES_FOUND=1
+      elif [[ "$VERBOSE_FLAG" -eq 1 ]]; then
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - CRC match: $file"
+      fi
     fi
+  # Else, do crc computation
   else
-    # Use ImageMagick's identify to check for corruption
-    # If -verbose flag is not used, false negatives may occur 
-    identify -regard-warnings $VERBOSE_FLAG "$file" >/dev/null 2>&1
+    # If file is of video type, use ffprobe, else identify
+    if [[ " ${VIDEO_EXTENSIONS[@]} " =~ " ${file##*.} " ]]; then
+      ffprobe -v error -i "$file" >/dev/null 2>&1
+    else
+      identify -regard-warnings -verbose "$file" >/dev/null 2>&1
+    fi
     if [ $? -ne 0 ]; then
-      echo "$(date '+%Y-%m-%d %H:%M:%S') - Corrupt image: $file" >> "$OUTPUT_FILE"
+      echo "$(date '+%Y-%m-%d %H:%M:%S') - Corrupt file: $file" | tee -a "$OUTPUT_FILE"
       CORRUPT_FILES_FOUND=1
     else
       # If no errors found and .crc does not exist, create the .crc file
       calculate_crc "$file" > "$crc_file"
+      if [[ "$VERBOSE_FLAG" -eq 1 ]]; then
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - Created crc file: $crc_file"
+      fi
     fi
   fi
   
 done
 
-# Find common video file types and check them
-find "$IMAGE_DIR" -type f \( -iname "*.mp4" -o -iname "*.mov" -o -iname "*.avi" -o -iname "*.mkv" -o -iname "*.flv" -o -iname "*.wmv" -o -iname "*.webm" -o -iname "*.mts" \) | sort | while read -r file; do
-  # Check for corresponding .crc file
-  crc_file="${file}.crc32.txt"
-  if [ -f "$crc_file" ] && [ $NO_VERIFY_FLAG -eq 0 ]; then
-   # Perform CRC check
-    calculated_crc=$(calculate_crc "$file")
-    stored_crc=$(cat "$crc_file" | tr -d '\r\n') # Handle potential line endings
-    if [ "$calculated_crc" != "$stored_crc" ]; then
-      echo "$(date '+%Y-%m-%d %H:%M:%S') - CRC mismatch: $file" >> "$OUTPUT_FILE"
-      CORRUPT_FILES_FOUND=1
-    fi
-  else
-    # Use ffprobe to check for corruption
-    ffprobe "$file" >/dev/null 2>&1
-    if [ $? -ne 0 ]; then
-      echo "$(date '+%Y-%m-%d %H:%M:%S') - Corrupt video: $file" >> "$OUTPUT_FILE"
-      CORRUPT_FILES_FOUND=1
-    else
-      # If no errors found and .crc does not exist, create the .crc file
-      calculate_crc "$file" > "$crc_file"
-    fi
-  fi
-done
-
-# Find and sort MP3 files by name before checking
-find "$IMAGE_DIR" -type f -iname "*.mp3" | sort | while read -r file; do
-  # Use ffprobe to check for corruption
-  ffprobe -v error -i "$file" >/dev/null 2>&1
-  if [ $? -ne 0 ]; then
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - $file" >> "$OUTPUT_FILE"
-    CORRUPT_FILES_FOUND=1
-  fi
-done
-
 # Provide feedback to the user
-#if [ -s "$OUTPUT_FILE" ]; then
 if [ $CORRUPT_FILES_FOUND -eq 1 ]; then
   echo "Corrupt files found. Check $OUTPUT_FILE for details."
-else
-  echo "No corrupt files found."
+  echo "Tip: Use backsync.sh to restore corrupt files from backup."
+  exit 1
 fi
+
+echo "No corrupt files found."
+exit 0
