@@ -20,7 +20,7 @@
 
 # Config
 # Supported image and video extensions
-IMAGE_EXTENSIONS=("jpg" "jpeg" "png" "heic")
+IMAGE_EXTENSIONS=("jpg" "jpeg" "png" "heic" "webp")
 IMAGE_SIDECAR_EXTENSIONS=("mp4" "mov" "aae")
 VIDEO_EXTENSIONS=("mp4" "mov" "avi" "mts")
 
@@ -139,7 +139,7 @@ function resolve_collision() {
 }
 
 # Pair renaming for image and sidecar files
-find "$TARGET_DIR" -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.heic" \) | while read -r FILE; do
+find "$TARGET_DIR" -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.heic" -o -iname "*.webp" \) | while read -r FILE; do
     SIDECAR_FILES=""
     DATE_TAKEN=""
 
@@ -180,16 +180,18 @@ find "$TARGET_DIR" -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png
     SIDECAR_FILES="${SIDECAR_FILES%;}"
 
     # Rename sidecar files
-    IFS=';' read -rA ADDR <<< "$SIDECAR_FILES"
-    for SIDE_FILE in "${ADDR[@]}"; do
-        SIDE_EXTENSION="${SIDE_FILE##*.}"
-        SIDE_NEW_NAME=$(resolve_collision "$dir_name" "$DATE_TAKEN" "$SIDE_EXTENSION")
-        if [[ $DRY_RUN_FLAG -eq 0 ]]; then
-            mv "$SIDE_FILE" "$dir_name/$SIDE_NEW_NAME"
-        fi
+    if [[ -n $SIDECAR_FILES ]]; then
+        IFS=';' read -rA ADDR <<< "$SIDECAR_FILES"
+        for SIDE_FILE in "${ADDR[@]}"; do
+            SIDE_EXTENSION="${SIDE_FILE##*.}"
+            SIDE_NEW_NAME=$(resolve_collision "$dir_name" "$DATE_TAKEN" "$SIDE_EXTENSION")
+            if [[ $DRY_RUN_FLAG -eq 0 ]]; then
+                mv "$SIDE_FILE" "$dir_name/$SIDE_NEW_NAME"
+            fi
 
-        echo "Renamed: $SIDE_FILE -> $dir_name/$SIDE_NEW_NAME" | tee -a "$LOG_FILE"
-    done
+            echo "Renamed: $SIDE_FILE -> $dir_name/$SIDE_NEW_NAME" | tee -a "$LOG_FILE"
+        done
+    fi
 done
 
 # Rename video files
