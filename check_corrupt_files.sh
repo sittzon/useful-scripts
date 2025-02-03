@@ -5,16 +5,16 @@
 # Uses ImageMagick and ffprobe (ffmpeg) for file verification.
 # Calculates and stores CRC checksum for files that passes verification.
 
+# Config
 IMAGE_EXTENSIONS=("jpg" "jpeg" "png" "webp" "heic")
 VIDEO_EXTENSIONS=("mp4" "mov" "mpg" "avi" "mkv" "flv" "wmv" "webm" "mts")
 
+# Parse command-line arguments
 TARGET_DIR=""
 OUTPUT_FILE="./corrupt_files.txt"
 NO_VERIFY_FLAG=0
 CORRUPT_FILES_FOUND=0
 VERBOSE_FLAG=0
-
-# Parse command-line arguments
 while [[ "$#" -gt 0 ]]; do
   case $1 in
     --dir) TARGET_DIR="$2"; shift ;;
@@ -71,7 +71,9 @@ for EXTENSION in "${VIDEO_EXTENSIONS[@]}"; do
     find_command="${find_command} -iname \"*.${EXTENSION}\" -o"
 done
 find_command="${find_command% -o}"
-# echo "find_command: $find_command"
+if [[ "$VERBOSE_FLAG" -eq 1 ]]; then
+  echo "find_command: $find_command"
+fi
 
 # Find all image and video files in the directory and its subdirectories
 current_dir=""
@@ -82,8 +84,6 @@ eval "$find_command" | sort | while read -r file; do
     current_dir="$dir"
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Verifying directory: $current_dir"
   fi
-  
-  # echo "file: $file"
 
   crc_file="${file}.crc32.txt"
   # If corresponding .crc file found, then verify
@@ -101,8 +101,12 @@ eval "$find_command" | sort | while read -r file; do
     fi
   # Else, do crc computation
   else
+    if [[ "$VERBOSE_FLAG" -eq 1 ]]; then
+      echo "$(date '+%Y-%m-%d %H:%M:%S') - Verifying file: $file" 
+    fi
     # If file is of video type, use ffprobe, else identify
-    if [[ " ${VIDEO_EXTENSIONS[@]} " =~ " ${file##*.} " ]]; then
+    local fileext="${file##*.}"
+    if [[ " ${VIDEO_EXTENSIONS[@]} " =~ " ${fileext:l} " ]]; then
       ffprobe -v error -i "$file" >/dev/null 2>&1
     else
       identify -regard-warnings -verbose "$file" >/dev/null 2>&1

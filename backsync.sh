@@ -46,7 +46,6 @@ fi
 # For every line in CORRUPT_FILES_LOG, copy the file from backup to primary
 tail -r "$CORRUPT_FILES_LOG" | while read -r LINE; do
     PRIMARY_FILE=$(echo "$LINE" | sed -n 's;.*Corrupt file: \(.*\);\1;p')
-    # BACKUP_FILE=$(echo "$PRIMARY_FILE" | sed 's;/Volumes/2TB;/Volumes/Backups/Backup;g')
     BACKUP_FILE=$(echo "$PRIMARY_FILE" | sed "s;${PRIMARY_DIR};${BACKUP_DIR};g")
 
     if [[ -e "$BACKUP_FILE" ]]; then
