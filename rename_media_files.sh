@@ -10,9 +10,7 @@
 # - Use dry-run to see what files will be renamed without actually renaming them
 #
 # TODO:
-# - Use list of extensions in find command instead of multiple -iname flags
 # - User defined date format
-# - User defined metadata field extraction
 
 # Nice to have:
 # - Multiple undo levels
@@ -22,7 +20,7 @@
 # Supported image and video extensions
 IMAGE_EXTENSIONS=("jpg" "jpeg" "png" "heic" "webp")
 IMAGE_SIDECAR_EXTENSIONS=("mp4" "mov" "aae")
-VIDEO_EXTENSIONS=("mp4" "mov" "avi" "mts")
+VIDEO_EXTENSIONS=("mp4" "mov" "avi" "mkv" "flv" "wmv" "webm" "mts")
 
 # Parse command-line arguments
 UNDO_FLAG=0
@@ -138,8 +136,16 @@ function resolve_collision() {
     echo "$new_name"
 }
 
+# Prepare find command
+find_command="find $TARGET_DIR -type f"
+for EXTENSION in "${IMAGE_EXTENSIONS[@]}"; do
+    find_command="${find_command} -iname \"*.${EXTENSION}\" -o"
+done
+find_command="${find_command% -o}"
+# echo "find_command: $find_command"
+
 # Pair renaming for image and sidecar files
-find "$TARGET_DIR" -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.heic" -o -iname "*.webp" \) | while read -r FILE; do
+eval "$find_command" | sort | while read -r FILE; do
     SIDECAR_FILES=""
     DATE_TAKEN=""
 
@@ -194,40 +200,41 @@ find "$TARGET_DIR" -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png
     fi
 done
 
-# Rename video files
-find "$TARGET_DIR" -type f \( -iname "*.mp4" -o -iname "*.mov" -o -iname "*.avi"  -o -iname "*.mts" \) | while read -r FILE; do
-    local base_name=$(basename "$FILE")
-    local dir_name=$(dirname "$FILE")
-    local filename="${base_name%.*}"
 
-    # Find potential corresponding image file, and if found, do not rename
-    local IMAGE_FILE=""
-    for EXTENSION in "${IMAGE_EXTENSIONS[@]}"; do
-        IMG_FILE="${dir_name}/${filename}.${EXTENSION}"
-        if [[ -e "$IMG_FILE" ]]; then
-            IMAGE_FILE="$IMG_FILE"
-            break
-        fi
-    done
+# # Rename video files
+# find "$TARGET_DIR" -type f \( -iname "*.mp4" -o -iname "*.mov" -o -iname "*.avi"  -o -iname "*.mts" \) | sort | while read -r FILE; do
+#     local base_name=$(basename "$FILE")
+#     local dir_name=$(dirname "$FILE")
+#     local filename="${base_name%.*}"
 
-    if [[ -n $IMAGE_FILE ]]; then
-        echo "Skipping: $FILE (video is already renamed, sidecar)" | tee -a "$LOG_FILE"
-        continue
-    fi
+#     # Find potential corresponding image file, and if found, do not rename
+#     local IMAGE_FILE=""
+#     for EXTENSION in "${IMAGE_EXTENSIONS[@]}"; do
+#         IMG_FILE="${dir_name}/${filename}.${EXTENSION}"
+#         if [[ -e "$IMG_FILE" ]]; then
+#             IMAGE_FILE="$IMG_FILE"
+#             break
+#         fi
+#     done
 
-    # Extract -CreatedDate from video metadata and check for collisions
-    local DATE_TAKEN=$(exiftool -s3 -d '%Y-%m-%d_%H%M%S' -CreateDate "$FILE" 2>/dev/null || echo "")
-    # Check if date not found, i.e date is 0000:00:00 00:00:00
-    if [[ "$DATE_TAKEN" == "0000:00:00 00:00:00" ]]; then
-        echo "Skipping: $FILE (no valid date found)" | tee -a "$LOG_FILE"
-        continue
-    fi
-    local VIDEO_NEW_NAME=$(resolve_collision "$dir_name" "$DATE_TAKEN" "${FILE##*.}")
-    if [[ $DRY_RUN_FLAG -eq 0 ]]; then
-        mv "$FILE" "$dir_name/$VIDEO_NEW_NAME"
-    fi
-    echo "Renamed: $FILE -> $dir_name/$VIDEO_NEW_NAME" | tee -a "$LOG_FILE"
-done
+#     if [[ -n $IMAGE_FILE ]]; then
+#         echo "Skipping: $FILE (video is already renamed, sidecar)" | tee -a "$LOG_FILE"
+#         continue
+#     fi
+
+#     # Extract -CreatedDate from video metadata and check for collisions
+#     local DATE_TAKEN=$(exiftool -s3 -d '%Y-%m-%d_%H%M%S' -CreateDate "$FILE" 2>/dev/null || echo "")
+#     # Check if date not found, i.e date is 0000:00:00 00:00:00
+#     if [[ "$DATE_TAKEN" == "0000:00:00 00:00:00" ]]; then
+#         echo "Skipping: $FILE (no valid date found)" | tee -a "$LOG_FILE"
+#         continue
+#     fi
+#     local VIDEO_NEW_NAME=$(resolve_collision "$dir_name" "$DATE_TAKEN" "${FILE##*.}")
+#     if [[ $DRY_RUN_FLAG -eq 0 ]]; then
+#         mv "$FILE" "$dir_name/$VIDEO_NEW_NAME"
+#     fi
+#     echo "Renamed: $FILE -> $dir_name/$VIDEO_NEW_NAME" | tee -a "$LOG_FILE"
+# done
 
 echo "Renaming completed successfully!"
 exit 0
