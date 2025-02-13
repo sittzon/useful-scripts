@@ -25,17 +25,20 @@ VIDEO_EXTENSIONS=("mp4" "mov" "avi" "mkv" "flv" "wmv" "webm" "mts")
 # Parse command-line arguments
 UNDO_FLAG=0
 DRY_RUN_FLAG=0
+RENAME_AAE_FILES_FLAG=0
 while [[ "$#" -gt 0 ]]; do
   case $1 in
     --dir) TARGET_DIR="$2"; shift ;;
     --undo) UNDO_FLAG=1 ;;
     --dry-run) DRY_RUN_FLAG=1 ;;
+    --rename-aae) RENAME_AAE_FILES_FLAG=1 ;;
     --help)
-      echo "Usage: $0 --dir <directory> [--undo] [--dry-run] [--help]"
-      echo "  --dir     Specify the directory containing images to check."
-      echo "  --undo    Undo the last rename operation."
-      echo "  --dry-run Show what files will be renamed without actually renaming them."
-      echo "  --help    Display this help message."
+      echo "Usage: $0 --dir <directory> [--undo] [--dry-run] [--help] [--rename-aae]"
+      echo "  --dir        Specify the directory containing images to check."
+      echo "  --undo       Undo the last rename operation."
+      echo "  --dry-run    Show what files will be renamed without actually renaming them."
+      echo "  --rename-aae Rename apple .aae files before matching (remove extra O in filename)."
+      echo "  --help       Display this help message."
       exit 0
       ;;
     *)
@@ -136,13 +139,30 @@ function resolve_collision() {
     echo "$new_name"
 }
 
+# Rename .aae files before matching
+if [[ $RENAME_AAE_FILES_FLAG -eq 1 ]]; then
+    find "$TARGET_DIR" -type f -iname "*.aae" | while read -r FILE; do
+        local base_name=$(basename "$FILE")
+        local dir_name=$(dirname "$FILE")
+        local filename="${base_name%.*}"
+        local file_extension="${base_name##*.}"
+
+        # Rename .aae files: remove extra O from filename
+        local NEW_NAME="${filename//O/}.${file_extension}"
+        if [[ $DRY_RUN_FLAG -eq 0 ]]; then
+            mv "$FILE" "$dir_name/$NEW_NAME"
+        fi
+
+        echo "Renamed: $FILE -> $dir_name/$NEW_NAME" | tee -a "$LOG_FILE"
+    done
+fi
+
 # Prepare find command
-find_command="find $TARGET_DIR -type f"
+find_command="find \"$TARGET_DIR\" -type f"
 for EXTENSION in "${IMAGE_EXTENSIONS[@]}"; do
     find_command="${find_command} -iname \"*.${EXTENSION}\" -o"
 done
 find_command="${find_command% -o}"
-# echo "find_command: $find_command"
 
 # Pair renaming for image and sidecar files
 eval "$find_command" | sort | while read -r FILE; do
@@ -200,41 +220,47 @@ eval "$find_command" | sort | while read -r FILE; do
     fi
 done
 
+# Prepare find command
+find_command="find \"$TARGET_DIR\" -type f"
+for EXTENSION in "${VIDEO_EXTENSIONS[@]}"; do
+    find_command="${find_command} -iname \"*.${EXTENSION}\" -o"
+done
+find_command="${find_command% -o}"
 
-# # Rename video files
-# find "$TARGET_DIR" -type f \( -iname "*.mp4" -o -iname "*.mov" -o -iname "*.avi"  -o -iname "*.mts" \) | sort | while read -r FILE; do
-#     local base_name=$(basename "$FILE")
-#     local dir_name=$(dirname "$FILE")
-#     local filename="${base_name%.*}"
+# Rename video files that are not sidecar files
+eval "$find_command" | sort | while read -r FILE; do
+    local base_name=$(basename "$FILE")
+    local dir_name=$(dirname "$FILE")
+    local filename="${base_name%.*}"
 
-#     # Find potential corresponding image file, and if found, do not rename
-#     local IMAGE_FILE=""
-#     for EXTENSION in "${IMAGE_EXTENSIONS[@]}"; do
-#         IMG_FILE="${dir_name}/${filename}.${EXTENSION}"
-#         if [[ -e "$IMG_FILE" ]]; then
-#             IMAGE_FILE="$IMG_FILE"
-#             break
-#         fi
-#     done
+    # Find potential corresponding image file, and if found, do not rename
+    local IMAGE_FILE=""
+    for EXTENSION in "${IMAGE_EXTENSIONS[@]}"; do
+        IMG_FILE="${dir_name}/${filename}.${EXTENSION}"
+        if [[ -e "$IMG_FILE" ]]; then
+            IMAGE_FILE="$IMG_FILE"
+            break
+        fi
+    done
 
-#     if [[ -n $IMAGE_FILE ]]; then
-#         echo "Skipping: $FILE (video is already renamed, sidecar)" | tee -a "$LOG_FILE"
-#         continue
-#     fi
+    if [[ -n $IMAGE_FILE ]]; then
+        echo "Skipping: $FILE (video is already renamed, sidecar)" | tee -a "$LOG_FILE"
+        continue
+    fi
 
-#     # Extract -CreatedDate from video metadata and check for collisions
-#     local DATE_TAKEN=$(exiftool -s3 -d '%Y-%m-%d_%H%M%S' -CreateDate "$FILE" 2>/dev/null || echo "")
-#     # Check if date not found, i.e date is 0000:00:00 00:00:00
-#     if [[ "$DATE_TAKEN" == "0000:00:00 00:00:00" ]]; then
-#         echo "Skipping: $FILE (no valid date found)" | tee -a "$LOG_FILE"
-#         continue
-#     fi
-#     local VIDEO_NEW_NAME=$(resolve_collision "$dir_name" "$DATE_TAKEN" "${FILE##*.}")
-#     if [[ $DRY_RUN_FLAG -eq 0 ]]; then
-#         mv "$FILE" "$dir_name/$VIDEO_NEW_NAME"
-#     fi
-#     echo "Renamed: $FILE -> $dir_name/$VIDEO_NEW_NAME" | tee -a "$LOG_FILE"
-# done
+    # Extract -CreateDate from video metadata and check for collisions
+    local DATE_TAKEN=$(exiftool -s3 -d '%Y-%m-%d_%H%M%S' -CreateDate "$FILE" 2>/dev/null || echo "")
+    # Check if date not found, i.e date is 0000:00:00 00:00:00
+    if [[ "$DATE_TAKEN" == "0000:00:00 00:00:00" ]]; then
+        echo "Skipping: $FILE (no valid date found)" | tee -a "$LOG_FILE"
+        continue
+    fi
+    local VIDEO_NEW_NAME=$(resolve_collision "$dir_name" "$DATE_TAKEN" "${FILE##*.}")
+    if [[ $DRY_RUN_FLAG -eq 0 ]]; then
+        mv "$FILE" "$dir_name/$VIDEO_NEW_NAME"
+    fi
+    echo "Renamed: $FILE -> $dir_name/$VIDEO_NEW_NAME" | tee -a "$LOG_FILE"
+done
 
 echo "Renaming completed successfully!"
 exit 0
